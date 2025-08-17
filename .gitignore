@@ -1,0 +1,9 @@
+.venv/
+registros/
+.env
+__pycache__/
+.streamlit/secrets.toml
+*.png
+*.jpg
+*.jpeg
+*.pdf
