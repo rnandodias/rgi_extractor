@@ -3,17 +3,32 @@ import io
 import json
 import os
 import tempfile
-
+from packaging import version
 import fitz  # PyMuPDF
 import pandas as pd
 import streamlit as st
 from PIL import Image
 
+SUPPORTS_CONTAINER = version.parse(st.__version__) >= version.parse("1.36.0")
+
 from rgi_extractor import extract_from_images
 
-st.set_page_config(page_title="Leitor de RGI — Protótipo", layout="wide")
+st.set_page_config(page_title="Leitor de RGI — Koortimativa — Protótipo", layout="wide")
 
 # ----------------- Utils -----------------
+def show_img(col, path):
+    img = Image.open(path)
+    caption = os.path.basename(path)
+    try:
+        if SUPPORTS_CONTAINER:
+            col.image(img, caption=caption, use_container_width=True)
+        else:
+            # versões antigas: usa o parâmetro antigo
+            col.image(img, caption=caption, use_column_width=True)
+    except TypeError:
+        # caso extremo: faz fallback automático
+        col.image(img, caption=caption, use_column_width=True)
+
 def pdf_bytes_to_images(pdf_bytes, dpi=240):
     """Converte PDF (bytes) em arquivos PNG temporários e retorna os caminhos."""
     paths = []
@@ -53,15 +68,15 @@ with st.sidebar:
     model = st.selectbox(
         "Modelo (OpenAI)",
         options=["gpt-4o", "gpt-4o-mini", "gpt-5", "gpt-5-mini"],
-        index=0  # default: gpt-4o-mini
+        index=0  # default: gpt-4o
     )
     dpi = st.slider("DPI (PDF → imagem)", min_value=120, max_value=300, value=240, step=20)
-    show_pages = st.checkbox("Mostrar páginas renderizadas", value=False)
+    show_pages = st.checkbox("Mostrar páginas renderizadas", value=True)
     st.divider()
-    if st.button("🧹 Novo arquivo (limpar)"):
+    if st.button("🧹 Novo arquivo (limpar)", key="reset_sidebar"):
         reset_app()
 
-st.title("📄 Leitor de RGI — Protótipo")
+st.title("📄 Leitor de RGI — Koortimativa — Protótipo")
 st.caption("Envie o PDF do registro. O app converte as páginas para imagens e extrai as informações e cria um JSON estruturado.")
 
 # ----------------- Upload -----------------
@@ -80,7 +95,8 @@ if uploaded is not None and st.button("🔎 Extrair informações", type="primar
             st.subheader("Páginas")
             cols = st.columns(2)
             for idx, p in enumerate(st.session_state.image_paths):
-                cols[idx % 2].image(Image.open(p), caption=os.path.basename(p), use_container_width=True)
+                # cols[idx % 2].image(Image.open(p), caption=os.path.basename(p), use_container_width=True)
+                show_img(cols[idx % 2], p)
 
         with st.spinner("Executando extração…"):
             data = extract_from_images(st.session_state.image_paths, provider="openai", model=model)
@@ -174,5 +190,5 @@ if "data" in st.session_state:
     )
 
     st.divider()
-    if st.button("🧹 Novo arquivo (limpar)"):
+    if st.button("🧹 Novo arquivo (limpar)", key="reset_main"):
         reset_app()
