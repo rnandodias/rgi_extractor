@@ -7,8 +7,59 @@ import re
 import sys
 import tempfile
 from typing import List, Dict, Any
-
 from dotenv import load_dotenv
+import re
+from collections import Counter
+
+NUM_M_RGX = re.compile(
+    r"(?<!\d)"
+    r"(\d{1,3}(?:\.\d{3})*(?:,\d+)?|\d+(?:\.\d+)?)"
+    r"\s*m(?:²|2)?\b",
+    re.IGNORECASE
+)
+
+def _to_float_pt(num_str: str) -> float | None:
+    s = num_str.replace(".", "").replace(",", ".")
+    try:
+        return float(s)
+    except:
+        return None
+
+def extract_measures_meters(text: str) -> list[float]:
+    """Extrai números seguidos de 'm', 'm²' etc. e devolve em metros (float)."""
+    if not text:
+        return []
+    vals = []
+    for m in NUM_M_RGX.finditer(text):
+        v = _to_float_pt(m.group(1))
+        if v is not None:
+            vals.append(v)
+    return vals
+
+def infer_area_from_texts(*texts: str) -> float | None:
+    """
+    Heurística simples:
+    - se existirem exatamente 2 medidas diferentes -> multiplica (retângulo).
+    - se existirem 3-4 medidas, pega as 2 mais frequentes/distintas e multiplica.
+    - caso contrário, não infere.
+    """
+    measures = []
+    for t in texts:
+        measures.extend(extract_measures_meters(t))
+    measures = [round(v, 4) for v in measures if v > 0]
+    if len(measures) < 2:
+        return None
+    # agrupa por valor aproximado
+    freq = Counter(measures)
+    # duas mais comuns
+    distinct = sorted(freq.keys(), key=lambda x: (-freq[x], -x))
+    if len(distinct) >= 2:
+        a, b = distinct[0], distinct[1]
+        area = a * b
+        # ignora valores absurdos
+        if 0 < area < 1e6:
+            return round(area, 2)
+    return None
 
 # OpenAI
 try:
@@ -57,22 +108,108 @@ RGI_JSON_SCHEMA = {
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
-                    "unidade": {"type": "string"},
-                    "endereco": {
+                    # Texto bruto fiel (mantido)
+                    "descricao": {"type": "string"},
+
+                    # Identificação / tipologia da unidade
+                    "identificacao": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "tipo": {"type": "string"},                 # ex.: apartamento, loja, sala, casa
+                            "unidade": {"type": "string"},              # nº da unidade (ex.: 402)
+                            "bloco_torre": {"type": "string"},          # ex.: Bloco B, Torre Sul
+                            "pavimento": {"type": "string"},            # ex.: 4º andar
+                            "edificio_condominio": {"type": "string"}   # nome do prédio/condomínio, se houver
+                        }
+                    },
+
+                    # Localização super detalhada
+                    "localizacao": {
                         "type": "object",
                         "additionalProperties": False,
                         "properties": {
                             "logradouro": {"type": "string"},
                             "numero": {"type": "string"},
+                            "complemento": {"type": "string"},          # ex.: apto 402, loja A
                             "bairro": {"type": "string"},
+                            "distrito": {"type": "string"},
                             "cidade": {"type": "string"},
-                            "uf": {"type": "string"}
+                            "uf": {"type": "string"},
+                            "cep": {"type": "string"},
+                            "lote": {"type": "string"},
+                            "quadra": {"type": "string"},
+                            "loteamento": {"type": "string"},
+                            "ponto_referencia": {"type": "string"}
                         }
                     },
-                    "descricao": {"type": "string"},
-                    "condominio_fracao_ideal": {"type": "string"},
-                    "vagas_estacionamento": {"type": "string"},
-                    "dimensoes": {"type": "string"},
+
+                    # Áreas e frações (mantém string original e número em m²)
+                    "areas": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "area_privativa_str": {"type": "string"},
+                            "area_privativa_m2": {"type": "number"},
+                            "area_total_str": {"type": "string"},
+                            "area_total_m2": {"type": "number"},
+                            "area_terreno_str": {"type": "string"},
+                            "area_terreno_m2": {"type": "number"},
+                            "fracao_ideal_str": {"type": "string"},     # ex.: 0,0123; 12,34%; 1/81
+                            "fracao_ideal_num": {"type": "number"}      # normalizado (decimal, ex.: 0.1234)
+                        }
+                    },
+
+                    # Configurações internas / dependências
+                    "dependencias": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "quartos": {"type": "integer"},
+                            "suites": {"type": "integer"},
+                            "banheiros": {"type": "integer"},
+                            "lavabos": {"type": "integer"},
+                            "salas": {"type": "integer"},
+                            "cozinha": {"type": "boolean"},
+                            "area_servico": {"type": "boolean"},
+                            "dependencia_empregada": {"type": "boolean"},
+                            "outros": {"type": "string"}                # livre: varanda, escritório, mezanino etc.
+                        }
+                    },
+
+                    # Vagas de garagem (quantidade, tipo e identificação)
+                    "vagas_garagem": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "quantidade": {"type": "integer"},
+                            "tipo": {"type": "string"},                  # autônoma, vinculada, indeterminada, presa, rotativa
+                            "identificacoes": {                          # lista de marcações quando existir (ex.: vaga 12-B)
+                                "type": "array",
+                                "items": {"type": "string"}
+                            }
+                        }
+                    },
+
+                    # Outras características úteis
+                    "caracteristicas": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "posicao": {"type": "string"},               # frente, fundos, lateral
+                            "orientacao_solar": {"type": "string"},      # norte, sul, etc.
+                            "vista": {"type": "string"},
+                            "estado_conservacao": {"type": "string"},    # novo, bom, regular…
+                            "padrao_construtivo": {"type": "string"},    # baixo, médio, alto
+                            "ano_construcao": {"type": "string"},
+                            "elevadores": {"type": "string"},
+                            "ocupacao": {"type": "string"},              # ocupado, desocupado (se constar)
+                            "uso": {"type": "string"},                   # residencial, comercial, misto
+                            "inscricao_municipal": {"type": "string"}    # IPTU/inscrição predial
+                        }
+                    },
+
+                    # Confrontações (como texto contínuo; se quiser, pode virar array no futuro)
                     "confrontacoes": {"type": "string"}
                 }
             },
@@ -187,23 +324,60 @@ RGI_JSON_SCHEMA = {
 }
 
 # ================= PROMPT =================
+# PROMPT_INSTRUCTIONS = """Você é um extrator jurídico rigoroso para registros de imóveis brasileiros.
+# Extraia o conteúdo das imagens e preencha SOMENTE o JSON conforme o schema, sem chaves extras.
+
+# Diretrizes:
+# - NÃO invente. Se algo não estiver visível, omita o campo.
+# - Datas: dd/mm/aaaa quando claro.
+# - CPFs: somente dígitos.
+# - 'imovel.descricao': transcrever fielmente o parágrafo “IMÓVEL - ...”.
+# - 'proprietarios': liste todos os proprietários com dados que estiverem visíveis (RG/CPF/estado civil/regime/quotas etc.).
+# - 'registros': para cada ato (R-*/AV-*):
+#   • 'numero', 'tipo', 'data' (se houver) e 'detalhes' com uma descrição clara do que foi averbado/registrado.
+#   • 'pessoas_envolvidas': relacione pessoas citadas no ato (ex.: herdeira, cônjuge, inventariante, ex-cônjuge).
+#   • 'valores': todos os valores que pertençam a ESSE ato (avaliado, ITBI, imposto de transmissão, valor fiscal etc.).
+# - 'valores_mencionados': todos os valores ao longo do documento, com moeda, valor_str, valor_num, contexto e página.
+# - 'selos_e_custas': selos, guias e custas como texto simples.
+# - 'referencias': pequenos trechos que justifiquem campos críticos (matrícula, unidade, proprietários e atos relevantes).
+# - O documento pode variar: preencha apenas o que estiver legível.
+# """
 PROMPT_INSTRUCTIONS = """Você é um extrator jurídico rigoroso para registros de imóveis brasileiros.
 Extraia o conteúdo das imagens e preencha SOMENTE o JSON conforme o schema, sem chaves extras.
 
-Diretrizes:
+Princípios:
 - NÃO invente. Se algo não estiver visível, omita o campo.
-- Datas: dd/mm/aaaa quando claro.
-- CPFs: somente dígitos.
-- 'imovel.descricao': transcrever fielmente o parágrafo “IMÓVEL - ...”.
-- 'proprietarios': liste todos os proprietários com dados que estiverem visíveis (RG/CPF/estado civil/regime/quotas etc.).
+- Datas: dd/mm/aaaa quando claro. CPFs: somente dígitos.
+- Documento pode variar: preencha apenas o que estiver legível.
+
+Priorize as CARACTERÍSTICAS DO IMÓVEL:
+1) 'imovel.descricao': transcreva fielmente o parágrafo “IMÓVEL - ...”.
+2) 'imovel.identificacao': tipo (apartamento, loja, sala, casa etc.), número da unidade, bloco/torre, pavimento, nome do edifício/condomínio.
+3) 'imovel.localizacao': logradouro, número, complemento (ex.: apto 402), bairro, cidade, UF, CEP, lote/quadra/loteamento se constarem.
+4) 'imovel.areas':
+   - Se encontrar “área privativa”, “área útil”, “área real” → preencha 'area_privativa_str' e 'area_privativa_m2' (número em m²).
+   - “área total”/“área construída” idem em 'area_total_*'.
+   - “fração ideal” (pode vir como 1/xx, 12,34%, 0,1234) → mantenha original em 'fracao_ideal_str' e normalize em 'fracao_ideal_num' (decimal).
+   - Sempre manter a forma original em *_str.
+   - Quando o documento listar apenas medidas lineares (ex.: frente/largura/comprimento em metros), calcule a área em m² **apenas se** houver evidência clara para um retângulo (duas medidas predominantes). Caso contrário, omita.
+5) 'imovel.dependencias': conte quantidades quando aparecerem: quartos, suítes, banheiros, lavabos, salas. Campos booleanos para cozinha/área de serviço/dpe.
+6) 'imovel.vagas_garagem': informe 'quantidade' quando explícita; 'tipo' (autônoma, vinculada, indeterminada, presa, rotativa); 'identificacoes' como lista quando houver vaga “12-B”, “G2-145” etc.
+7) 'imovel.caracteristicas': posicao (frente/fundos/lateral), orientação solar, vista, estado de conservação, padrão construtivo, ano de construção, elevadores, ocupação (ocupado/desocupado), uso (residencial/comercial), inscrição municipal (IPTU).
+8) 'imovel.confrontacoes': se houver, como texto corrido.
+
+Registros e valores:
+- 'proprietarios': liste todos os proprietários com dados visíveis (RG/CPF/estado civil/regime/quotas etc.).
 - 'registros': para cada ato (R-*/AV-*):
-  • 'numero', 'tipo', 'data' (se houver) e 'detalhes' com uma descrição clara do que foi averbado/registrado.
-  • 'pessoas_envolvidas': relacione pessoas citadas no ato (ex.: herdeira, cônjuge, inventariante, ex-cônjuge).
-  • 'valores': todos os valores que pertençam a ESSE ato (avaliado, ITBI, imposto de transmissão, valor fiscal etc.).
-- 'valores_mencionados': todos os valores ao longo do documento, com moeda, valor_str, valor_num, contexto e página.
-- 'selos_e_custas': selos, guias e custas como texto simples.
-- 'referencias': pequenos trechos que justifiquem campos críticos (matrícula, unidade, proprietários e atos relevantes).
-- O documento pode variar: preencha apenas o que estiver legível.
+  • 'numero', 'tipo', 'data' (se houver) e 'detalhes' com descrição clara.
+  • 'pessoas_envolvidas': cite nome + relação (ex.: herdeira, cônjuge, inventariante).
+  • 'valores': associe valores ao ato quando fizer sentido (avaliado, ITBI, imposto de transmissão, valor fiscal).
+- 'valores_mencionados': liste todos os valores ao longo do documento com moeda, valor_str, valor_num, contexto e página.
+- 'selos_e_custas': registre guias, selos e custas em texto simples.
+- 'referencias': pequenos trechos (citações) que justifiquem campos críticos (matrícula, unidade, áreas, vagas etc.).
+
+Observações:
+- Números de área devem estar em m² (ponto decimal), mantendo também a forma original em *_str.
+- Se não ficar claro se um número é privativa vs total, preencha só o campo *_str correspondente e deixe o *_m2 vazio.
 """
 
 # ================= Helpers =================
@@ -345,6 +519,38 @@ def extract_with_openai(image_paths: List[str], model: str = "gpt-4o-mini") -> D
             r.pop("pessoas_envovidas", None)
         fixed_regs.append(r)
     merged["registros"] = fixed_regs
+    # --- Pós-processamento: inferir áreas quando possível ---
+    conf = merged.get("confidence") or {}
+    conf.setdefault("derived", {})
+
+    imv = merged.get("imovel") or {}
+    areas = imv.get("areas") or {}
+    desc = (imv.get("descricao") or "") + " "
+    conf_txt = (imv.get("confrontacoes") or "") + " "
+    dim_txt = (imv.get("dimensoes") or "") + " "  # se você tiver esse campo
+
+    # tenta inferir área total se não houver
+    if not areas.get("area_total_m2"):
+        inferred_total = infer_area_from_texts(desc, conf_txt, dim_txt)
+        if inferred_total:
+            areas["area_total_m2"] = inferred_total
+            if not areas.get("area_total_str"):
+                areas["area_total_str"] = f"{inferred_total:.2f} m² (inferido)"
+            conf["derived"].setdefault("areas", {})["area_total_m2"] = "inferido a partir de medidas lineares no texto"
+
+    # tenta inferir área de terreno se não houver (usa confrontações e dimensões com prioridade)
+    if not areas.get("area_terreno_m2"):
+        inferred_terr = infer_area_from_texts(conf_txt, dim_txt)
+        if inferred_terr:
+            areas["area_terreno_m2"] = inferred_terr
+            if not areas.get("area_terreno_str"):
+                areas["area_terreno_str"] = f"{inferred_terr:.2f} m² (inferido)"
+            conf["derived"].setdefault("areas", {})["area_terreno_m2"] = "inferido a partir de confrontações/dimensões"
+
+    # escreve de volta
+    imv["areas"] = areas
+    merged["imovel"] = imv
+    merged["confidence"] = conf
 
     return merged
 
